@@ -53,6 +53,13 @@ func (h *ServerHeap) Pop() interface{} {
 	return x
 }
 
+func (h *ServerHeap) Top() *ServerNode {
+	if len(h.nodes) == 0 {
+		return nil
+	}
+	return &h.nodes[0]
+}
+
 // Constructor for creating a new heap with a specific comparer
 func ServerHeapConstructor(comparer Comparer) *ServerHeap {
 	return &ServerHeap{

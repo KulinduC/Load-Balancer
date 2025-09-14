@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"crypto/md5"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -36,7 +37,6 @@ type EndPoints struct {
 	activeConnections []int // tracks active connections for each server
 	// For weighted round robin
 	weights       []int // defines how many request each server can handle
-	currentWeight int
 	// For heap-based algorithms
 	connHeap   *ServerHeap // min-heap for least connections
 	weightHeap *ServerHeap // max-heap for weighted round robin
@@ -45,7 +45,7 @@ type EndPoints struct {
 }
 
 // Initialize heaps based on algorithm
-func (e *EndPoints) InitHeaps(algorithm Algorithm) {
+func (e *EndPoints) InitHeap(algorithm Algorithm) {
 	e.algorithm = algorithm
 
 	switch algorithm {
@@ -87,7 +87,6 @@ func (e *EndPoints) InitHeaps(algorithm Algorithm) {
 		e.weightHeap = nil
 	}
 }
-
 // Round Robin
 func (e *EndPoints) GetServerRR() *url.URL {
 	if len(e.List) == 0 {
@@ -109,6 +108,9 @@ func (e *EndPoints) GetServerLC() *url.URL {
 	// unlock mutex after function returns
 	defer e.mutex.Unlock()
 
+	if e.connHeap.Len() == 0 {
+		e.InitHeap(e.algorithm)
+	}
 	for e.connHeap.Len() > 0 {
 		node := heap.Pop(e.connHeap).(ServerNode)
 		if testServer(e.List[node.Index].String()) {
@@ -144,17 +146,29 @@ func (e *EndPoints) GetServerIPHash(clientIP string) *url.URL {
 
 // Weighted Round Robin using heap
 func (e *EndPoints) GetServerWRR() *url.URL {
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
 	if len(e.List) == 0 {
 		return nil
 	}
 
-	for e.weightHeap.Len() > 0 {
-		node := heap.Pop(e.weightHeap).(ServerNode)
-		if testServer(e.List[node.Index].String()) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
 
+	// If heap is empty, repopulate it
+	if e.weightHeap.Len() == 0 {
+		e.InitHeap(e.algorithm)
+	}
+
+	for e.weightHeap.Len() > 0 {
+		node := e.weightHeap.Top()
+		if testServer(e.List[node.Index].String()) {
+			// Decrement weight (since we use negative weights for max-heap)
+			node.Weight++
+			// If weight is 0, pop it out of the heap
+			if node.Weight == 0 {
+				heap.Pop(e.weightHeap)
+			} else {
+				heap.Fix(e.weightHeap,0)
+			}
 			return e.List[node.Index]
 		}
 	}
@@ -182,9 +196,9 @@ func MakeLoadBalancer(amount int, algorithm Algorithm) {
 	ep.activeConnections = make([]int, amount)
 
 	// Initialize weights for weighted round robin
-	// ep.weights = []int{3, 1, 2, 1, 3} // Different weights for each server
+	ep.weights = []int{3, 1, 2, 1, 3} // Different weights for each server
 
-	ep.InitHeaps(algorithm)
+	ep.InitHeap(algorithm)
 
 	router.HandleFunc("/loadbalancer", makeRequest(&lb, &ep))
 
@@ -245,5 +259,6 @@ func testServer(endpoint string) bool {
 }
 
 func getClientIP(r *http.Request) string {
-
+    ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+    return ip
 }
