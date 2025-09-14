@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
@@ -42,6 +43,8 @@ type EndPoints struct {
 	weightHeap *ServerHeap // max-heap for weighted round robin
 	algorithm  Algorithm   // tracks algorithm for heap
 	mutex      sync.Mutex  // mutex for locking and unlocking the heap
+	healthStatus []bool      // tracks health status of each server
+	lastCheck    []time.Time // tracks last health check time
 }
 
 // Initialize heaps based on algorithm
@@ -87,6 +90,46 @@ func (e *EndPoints) Initialize(algorithm Algorithm) {
 		e.weightHeap = nil
 	}
 }
+
+
+// Better health check with caching and timeout
+func (e *EndPoints) isServerHealthy(index int) bool {
+	if index >= len(e.healthStatus) {
+		return false
+	}
+
+	// If we checked recently (within 5 seconds), return cached result
+	if time.Since(e.lastCheck[index]) < 5*time.Second {
+		return e.healthStatus[index]
+	}
+
+	// Perform health check with timeout
+	healthy := e.quickHealthCheck(index)
+	e.healthStatus[index] = healthy
+	e.lastCheck[index] = time.Now()
+	return healthy
+}
+
+// Quick health check with timeout
+func (e *EndPoints) quickHealthCheck(index int) bool {
+	serverURL := e.List[index].String()
+
+	// Create client with 2 second timeout
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+	}
+
+	resp, err := client.Get(serverURL)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Consider healthy if status is 200-299
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+
 // Round Robin
 func (e *EndPoints) GetServerRR() *url.URL {
 	if len(e.List) == 0 {
@@ -113,7 +156,7 @@ func (e *EndPoints) GetServerLC() *url.URL {
 	}
 	for e.connHeap.Len() > 0 {
 		node := e.connHeap.Top()
-		if testServer(e.List[node.Index].String()) {
+		if e.isServerHealthy(node.Index) {
 			e.activeConnections[node.Index]++
 			node.Connections = e.activeConnections[node.Index]
 			heap.Fix(e.connHeap,0)
@@ -160,20 +203,20 @@ func (e *EndPoints) GetServerWRR() *url.URL {
 
 	for e.weightHeap.Len() > 0 {
 		node := e.weightHeap.Top()
-		if testServer(e.List[node.Index].String()) {
+		if e.isServerHealthy(node.Index) {
 			// Decrement weight (since we use negative weights for max-heap)
 			node.Weight++
 			// If weight is 0, pop it out of the heap
 			if node.Weight == 0 {
 				heap.Pop(e.weightHeap)
 			} else {
-				heap.Fix(e.weightHeap,0)
+				heap.Fix(e.weightHeap, 0)
 			}
 			return e.List[node.Index]
 		} else {
-        // Remove unhealthy server from heap
-        heap.Pop(e.weightHeap)
-    }
+			// Remove unhealthy server from heap
+			heap.Pop(e.weightHeap)
+		}
 	}
 
 	return nil
@@ -202,16 +245,24 @@ func MakeLoadBalancer(amount int, algorithm Algorithm) {
 		ep.weights[i] = (i%4) + 1
 	}
 
+	// Initialize health status - all servers start as healthy
+	ep.healthStatus = make([]bool, amount)
+	ep.lastCheck = make([]time.Time, amount)
+	for i := range ep.healthStatus {
+		ep.healthStatus[i] = true
+		ep.lastCheck[i] = time.Now()
+	}
+
 	// Initialize connection tracking
 	ep.Initialize(algorithm)
 
-	router.HandleFunc("/loadbalancer", makeRequest(&lb, &ep, amount))
+	router.HandleFunc("/loadbalancer", makeRequest(&lb, &ep))
 
 	// Listen and serve
 	log.Fatal(server.ListenAndServe())
 }
 
-func makeRequest(lb *LoadBalancer, ep *EndPoints, amount int) func(w http.ResponseWriter, r *http.Request) {
+func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var selectedServer *url.URL
 
@@ -251,16 +302,6 @@ func createEndPoint(endpoint string, index int) *url.URL {
 		return nil
 	}
 	return parsedURL
-}
-
-func testServer(endpoint string) bool {
-	response, err := http.Get(endpoint)
-	if err != nil {
-		return false
-	}
-	defer response.Body.Close()
-
-	return response.StatusCode == http.StatusOK
 }
 
 func getClientIP(r *http.Request) string {
