@@ -45,7 +45,7 @@ type EndPoints struct {
 }
 
 // Initialize heaps based on algorithm
-func (e *EndPoints) InitHeap(algorithm Algorithm) {
+func (e *EndPoints) Initialize(algorithm Algorithm) {
 	e.algorithm = algorithm
 
 	switch algorithm {
@@ -109,19 +109,19 @@ func (e *EndPoints) GetServerLC() *url.URL {
 	defer e.mutex.Unlock()
 
 	if e.connHeap.Len() == 0 {
-		e.InitHeap(e.algorithm)
+		e.Initialize(LeastConnections)
 	}
 	for e.connHeap.Len() > 0 {
-		node := heap.Pop(e.connHeap).(ServerNode)
+		node := e.connHeap.Top()
 		if testServer(e.List[node.Index].String()) {
 			e.activeConnections[node.Index]++
-			heap.Push(e.connHeap, ServerNode{
-				Index:       node.Index,
-				Connections: e.activeConnections[node.Index],
-				Weight:      0,
-			})
+			node.Connections = e.activeConnections[node.Index]
+			heap.Fix(e.connHeap,0)
 			return e.List[node.Index]
-		}
+		} else {
+        // Remove unhealthy server from heap
+        heap.Pop(e.connHeap)
+    }
 	}
 	return nil
 }
@@ -155,7 +155,7 @@ func (e *EndPoints) GetServerWRR() *url.URL {
 
 	// If heap is empty, repopulate it
 	if e.weightHeap.Len() == 0 {
-		e.InitHeap(e.algorithm)
+		e.Initialize(WeightedRoundRobin)
 	}
 
 	for e.weightHeap.Len() > 0 {
@@ -170,7 +170,10 @@ func (e *EndPoints) GetServerWRR() *url.URL {
 				heap.Fix(e.weightHeap,0)
 			}
 			return e.List[node.Index]
-		}
+		} else {
+        // Remove unhealthy server from heap
+        heap.Pop(e.weightHeap)
+    }
 	}
 
 	return nil
@@ -192,21 +195,23 @@ func MakeLoadBalancer(amount int, algorithm Algorithm) {
 		ep.List = append(ep.List, createEndPoint(baseURL, i))
 	}
 
-	// Initialize connection tracking
 	ep.activeConnections = make([]int, amount)
 
-	// Initialize weights for weighted round robin
-	ep.weights = []int{3, 1, 2, 1, 3} // Different weights for each server
+	ep.weights = make([]int, amount)
+	for i := 0; i < amount; i++ {
+		ep.weights[i] = (i%4) + 1
+	}
 
-	ep.InitHeap(algorithm)
+	// Initialize connection tracking
+	ep.Initialize(algorithm)
 
-	router.HandleFunc("/loadbalancer", makeRequest(&lb, &ep))
+	router.HandleFunc("/loadbalancer", makeRequest(&lb, &ep, amount))
 
 	// Listen and serve
 	log.Fatal(server.ListenAndServe())
 }
 
-func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r *http.Request) {
+func makeRequest(lb *LoadBalancer, ep *EndPoints, amount int) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var selectedServer *url.URL
 
