@@ -3,7 +3,6 @@ package loadbalancer
 import (
 	"container/heap"
 	"crypto/md5"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -135,11 +134,8 @@ func (e *EndPoints) decrementConnection(serverIndex int) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
-	if serverIndex >= 0 && serverIndex < len(e.activeConnections) && e.activeConnections[serverIndex] > 0 {
+	if serverIndex >= 0 && serverIndex < len(e.activeConnections) && e.activeConnections[serverIndex] > 0 && e.connHeap != nil {
 		e.activeConnections[serverIndex]--
-	}
-
-	if e.connHeap != nil {
 		for i := 0; i < e.connHeap.Len(); i++ {
 			if e.connHeap.nodes[i].Index == serverIndex {
 				e.connHeap.nodes[i].Connections = e.activeConnections[serverIndex]
@@ -264,8 +260,6 @@ func MakeLoadBalancer(amount int, algorithm Algorithm) {
 		ep.weights[i] = (i%4) + 1
 	}
 
-	fmt.Print(ep.weights)
-
 	// Initialize health status - all servers start as healthy
 	ep.healthStatus = make([]bool, amount)
 	ep.lastCheck = make([]time.Time, amount)
@@ -299,7 +293,7 @@ func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r 
 			selectedServer, serverIndex = ep.GetServerLC()
 
 			if serverIndex >= 0 {
-				ep.decrementConnection(serverIndex)
+				defer ep.decrementConnection(serverIndex)
 			}
 		case IPHash:
 			selectedServer = ep.GetServerIPHash(clientIP)
