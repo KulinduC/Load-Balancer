@@ -4,17 +4,34 @@ import (
 	"fmt"
 	"loadbalancer/loadbalancer"
 	"loadbalancer/servers"
+	"os"
 	"sync"
 	"time"
 )
 
 func main() {
 	// Number of backend servers
-	amount := 5
+	amount := 8
 
-	// Algorithm to use (change this to test different algorithms)
-	// Options: "RoundRobin", "LeastConnections", "IPHash", "WeightedRoundRobin"
-	algorithm := "LeastConnections"
+	// Algorithm to use - can be set via command line argument
+	// Options: RoundRobin, LeastConnections, IPHash, WeightedRoundRobin
+	algorithm := loadbalancer.RoundRobin
+
+	// Check for command line argument to override algorithm
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "RoundRobin":
+			algorithm = loadbalancer.RoundRobin
+		case "LeastConnections":
+			algorithm = loadbalancer.LeastConnections
+		case "IPHash":
+			algorithm = loadbalancer.IPHash
+		case "WeightedRoundRobin":
+			algorithm = loadbalancer.WeightedRoundRobin
+		default:
+			fmt.Printf("Unknown algorithm: %s. Using default: %s\n", os.Args[1], algorithm)
+		}
+	}
 
 	// WaitGroup to coordinate goroutines
 	var wg sync.WaitGroup
@@ -34,7 +51,8 @@ func main() {
 	go func() {
 		defer wg.Done()
 		fmt.Printf("Starting load balancer on port 8090 with %s algorithm...\n", algorithm)
-		loadbalancer.MakeLoadBalancer(amount, loadbalancer.LeastConnections)
+		// Use "0.0.0.0" to bind to all interfaces for external access
+		loadbalancer.MakeLoadBalancer(amount, algorithm, "0.0.0.0")
 	}()
 
 	// Wait for both to complete (they run indefinitely)
