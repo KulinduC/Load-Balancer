@@ -27,14 +27,14 @@ func (c WeightComparer) Less(a, b ServerNode) bool {
 
 // ServerHeap is a generic heap that uses a Comparer
 type ServerHeap struct {
-	nodes    []ServerNode
+	nodes    []*ServerNode
 	comparer Comparer
 }
 
 func (h ServerHeap) Len() int { return len(h.nodes) }
 
 func (h ServerHeap) Less(i, j int) bool {
-	return h.comparer.Less(h.nodes[i], h.nodes[j])
+	return h.comparer.Less(*h.nodes[i], *h.nodes[j])
 }
 
 func (h ServerHeap) Swap(i, j int) {
@@ -42,7 +42,7 @@ func (h ServerHeap) Swap(i, j int) {
 }
 
 func (h *ServerHeap) Push(x interface{}) {
-	h.nodes = append(h.nodes, x.(ServerNode))
+	h.nodes = append(h.nodes, x.(*ServerNode))
 }
 
 func (h *ServerHeap) Pop() interface{} {
@@ -57,13 +57,13 @@ func (h *ServerHeap) Top() *ServerNode {
 	if len(h.nodes) == 0 {
 		return nil
 	}
-	return &h.nodes[0]
+	return h.nodes[0]
 }
 
 // Constructor for creating a new heap with a specific comparer
 func ServerHeapConstructor(comparer Comparer) *ServerHeap {
 	return &ServerHeap{
-		nodes:    make([]ServerNode, 0),
+		nodes:    make([]*ServerNode, 0),
 		comparer: comparer,
 	}
 }
