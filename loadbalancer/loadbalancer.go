@@ -3,6 +3,7 @@ package loadbalancer
 import (
 	"container/heap"
 	"crypto/md5"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -229,9 +230,10 @@ func MakeLoadBalancer(amount int, algorithm Algorithm) {
 	// Server and router
 	router := http.NewServeMux()
 	server := http.Server{
-		Addr:    ":8090",
-		Handler: router,
-	}
+    Addr:    "0.0.0.0:8090", // explicit: accept remote clients
+    Handler: router,
+}
+
 
 	// Creating endpoints
 	for i := 0; i < amount; i++ {
@@ -245,6 +247,8 @@ func MakeLoadBalancer(amount int, algorithm Algorithm) {
 		ep.weights[i] = (i%4) + 1
 	}
 
+	fmt.Print(ep.weights)
+
 	// Initialize health status - all servers start as healthy
 	ep.healthStatus = make([]bool, amount)
 	ep.lastCheck = make([]time.Time, amount)
@@ -256,7 +260,7 @@ func MakeLoadBalancer(amount int, algorithm Algorithm) {
 	// Initialize connection tracking
 	ep.Initialize(algorithm)
 
-	router.HandleFunc("/loadbalancer", makeRequest(&lb, &ep))
+	router.HandleFunc("/loadbalancer/", makeRequest(&lb, &ep))
 
 	// Listen and serve
 	log.Fatal(server.ListenAndServe())

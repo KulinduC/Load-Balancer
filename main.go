@@ -11,7 +11,7 @@ import (
 
 func main() {
 	// Number of backend servers
-	amount := 8
+	amount := 4
 
 	// Algorithm to use - can be set via command line argument
 	// Options: RoundRobin, LeastConnections, IPHash, WeightedRoundRobin
@@ -51,8 +51,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		fmt.Printf("Starting load balancer on port 8090 with %s algorithm...\n", algorithm)
-		// Use "0.0.0.0" to bind to all interfaces for external access
-		loadbalancer.MakeLoadBalancer(amount, algorithm, "0.0.0.0")
+		loadbalancer.MakeLoadBalancer(amount, algorithm)
 	}()
 
 	// Wait for both to complete (they run indefinitely)
