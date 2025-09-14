@@ -131,6 +131,25 @@ func (e *EndPoints) quickHealthCheck(index int) bool {
 }
 
 
+func (e *EndPoints) decrementConnection(serverIndex int) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	if serverIndex >= 0 && serverIndex < len(e.activeConnections) && e.activeConnections[serverIndex] > 0 {
+		e.activeConnections[serverIndex]--
+	}
+
+	if e.connHeap != nil {
+		for i := 0; i < e.connHeap.Len(); i++ {
+			if e.connHeap.nodes[i].Index == serverIndex {
+				e.connHeap.nodes[i].Connections = e.activeConnections[serverIndex]
+				heap.Fix(e.connHeap,i)
+				break
+			}
+		}
+	}
+}
+
 // Round Robin
 func (e *EndPoints) GetServerRR() *url.URL {
 	if len(e.List) == 0 {
@@ -140,15 +159,6 @@ func (e *EndPoints) GetServerRR() *url.URL {
 	index := e.currIndex
 	e.currIndex = (e.currIndex + 1) % len(e.List)
 	return e.List[index]
-}
-
-func (e *EndPoints) decrementConnection(serverIndex int) {
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
-
-	if serverIndex >= 0 && serverIndex < len(e.activeConnections) && e.activeConnections[serverIndex] > 0 {
-		e.activeConnections[serverIndex]--
-	}
 }
 // Least Connections
 func (e *EndPoints) GetServerLC() (*url.URL, int) {

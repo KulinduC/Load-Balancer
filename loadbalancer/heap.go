@@ -6,7 +6,7 @@ type ServerNode struct {
 	Weight      int // negative for max-heap
 }
 
-// Comparer interface defines how to compare ServerNodes
+// Comparer interface defines how to compare ServerNodes“
 type Comparer interface {
 	Less(ServerNode, ServerNode) bool
 }
