@@ -142,32 +142,39 @@ func (e *EndPoints) GetServerRR() *url.URL {
 	return e.List[index]
 }
 
+func (e *EndPoints) decrementConnection(serverIndex int) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	if serverIndex >= 0 && serverIndex < len(e.activeConnections) && e.activeConnections[serverIndex] > 0 {
+		e.activeConnections[serverIndex]--
+	}
+}
 // Least Connections
-func (e *EndPoints) GetServerLC() *url.URL {
+func (e *EndPoints) GetServerLC() (*url.URL, int) {
 	if len(e.List) == 0 {
-		return nil
+		return nil, -1
 	}
 
 	e.mutex.Lock()
-	// unlock mutex after function returns
 	defer e.mutex.Unlock()
 
 	if e.connHeap.Len() == 0 {
 		e.Initialize(LeastConnections)
 	}
+
 	for e.connHeap.Len() > 0 {
 		node := e.connHeap.Top()
 		if e.isServerHealthy(node.Index) {
 			e.activeConnections[node.Index]++
 			node.Connections = e.activeConnections[node.Index]
-			heap.Fix(e.connHeap,0)
-			return e.List[node.Index]
+			heap.Fix(e.connHeap, 0)
+			return e.List[node.Index], node.Index
 		} else {
-        // Remove unhealthy server from heap
-        heap.Pop(e.connHeap)
-    }
+			heap.Pop(e.connHeap)
+		}
 	}
-	return nil
+	return nil, -1
 }
 
 // IP Hash
@@ -278,7 +285,12 @@ func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r 
 		case RoundRobin:
 			selectedServer = ep.GetServerRR()
 		case LeastConnections:
-			selectedServer = ep.GetServerLC()
+			var serverIndex int
+			selectedServer, serverIndex = ep.GetServerLC()
+
+			if serverIndex >= 0 {
+				ep.decrementConnection(serverIndex)
+			}
 		case IPHash:
 			selectedServer = ep.GetServerIPHash(clientIP)
 		case WeightedRoundRobin:
