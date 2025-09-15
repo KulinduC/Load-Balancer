@@ -3,6 +3,8 @@ package loadbalancer
 import (
 	"container/heap"
 	"crypto/md5"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -17,6 +19,16 @@ import (
 var (
 	baseURL = "http://localhost:808"
 )
+
+type onCloseReadCloser struct {
+	io.ReadCloser
+	onClose func()
+}
+func (r *onCloseReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	if r.onClose != nil { r.onClose() }
+	return err
+}
 
 type Algorithm string
 
@@ -47,6 +59,60 @@ type EndPoints struct {
 	lastCheck    []time.Time // tracks last health check time
 }
 
+func (e *EndPoints) DebugServers() {
+	fmt.Println("=== SERVER DEBUG INFO ===")
+	fmt.Printf("Total servers: %d\n", len(e.List))
+	fmt.Printf("Algorithm: %s\n", e.algorithm)
+	if e.algorithm == LeastConnections {
+		fmt.Printf("Heap length: %d\n", e.connHeap.Len())
+	}
+	if e.algorithm == WeightedRoundRobin {
+		fmt.Printf("Heap length: %d\n", e.weightHeap.Len())
+	}
+	fmt.Println()
+
+
+	for i := 0; i < len(e.List); i++ {
+		healthy := e.isServerHealthy(i)
+		url := e.List[i].String()
+
+		fmt.Printf("Server %d:\n", i)
+    fmt.Printf("  URL: %s\n", url)
+    fmt.Printf("  Healthy: %t\n", healthy)
+		if e.algorithm == LeastConnections {
+    	fmt.Printf("  Server Connections: %d\n", e.activeConnections[i])
+		}
+		if e.algorithm == WeightedRoundRobin {
+			fmt.Printf("  Server Weight: %d\n",e.weights[i])
+		}
+    fmt.Printf("  Last Health Check: %v\n", e.lastCheck[i])
+    fmt.Println()
+	}
+
+	if e.algorithm == WeightedRoundRobin {
+		if e.weightHeap != nil && e.weightHeap.Len() > 0 {
+			fmt.Println("=== HEAP CONTENTS ===")
+			for i := 0; i < e.weightHeap.Len(); i++ {
+				node := e.weightHeap.nodes[i]
+				fmt.Printf("Heap[%d]: Server %d, Weights %d\n",
+                i, node.Index, node.Weight * -1)
+			}
+		}
+	}
+
+	if e.algorithm == LeastConnections {
+		if e.connHeap != nil && e.connHeap.Len() > 0 {
+			fmt.Println("=== HEAP CONTENTS ===")
+			for i := 0; i < e.connHeap.Len(); i++ {
+				node := e.connHeap.nodes[i]
+				fmt.Printf("Heap[%d]: Server %d, Connections %d\n",
+                i, node.Index, node.Connections)
+			}
+		}
+	}
+	fmt.Println("=========================")
+}
+
 // Initialize heaps based on algorithm
 func (e *EndPoints) Initialize(algorithm Algorithm) {
 	e.algorithm = algorithm
@@ -59,12 +125,11 @@ func (e *EndPoints) Initialize(algorithm Algorithm) {
 
 		// Add all servers to connection heap
 		for i := range e.List {
-			connNode := ServerNode{
+			heap.Push(e.connHeap, &ServerNode{
 				Index:       i,
 				Connections: 0,
 				Weight:      0,
-			}
-			heap.Push(e.connHeap, connNode)
+			})
 		}
 		e.weightHeap = nil
 
@@ -75,12 +140,11 @@ func (e *EndPoints) Initialize(algorithm Algorithm) {
 
 		// Add all servers to weight heap (use negative weights for max-heap)
 		for i := range e.List {
-			weightNode := ServerNode{
+			heap.Push(e.weightHeap, &ServerNode{
 				Index:       i,
 				Connections: 0,
 				Weight:      -e.weights[i], // Negative for max-heap
-			}
-			heap.Push(e.weightHeap, weightNode)
+			})
 		}
 		e.connHeap = nil
 
@@ -168,6 +232,7 @@ func (e *EndPoints) GetServerLC() (*url.URL, int) {
 	if e.connHeap.Len() == 0 {
 		e.Initialize(LeastConnections)
 	}
+	e.DebugServers()
 
 	for e.connHeap.Len() > 0 {
 		node := e.connHeap.Top()
@@ -214,6 +279,7 @@ func (e *EndPoints) GetServerWRR() *url.URL {
 	if e.weightHeap.Len() == 0 {
 		e.Initialize(WeightedRoundRobin)
 	}
+	e.DebugServers()
 
 	for e.weightHeap.Len() > 0 {
 		node := e.weightHeap.Top()
@@ -280,6 +346,7 @@ func MakeLoadBalancer(amount int, algorithm Algorithm) {
 func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var selectedServer *url.URL
+		var selectedServerIndex int = -1
 
 		// Get client IP for IP Hash algorithm
 		clientIP := getClientIP(r)
@@ -288,17 +355,15 @@ func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r 
 		switch lb.Algo {
 		case RoundRobin:
 			selectedServer = ep.GetServerRR()
-		case LeastConnections:
-			var serverIndex int
-			selectedServer, serverIndex = ep.GetServerLC()
 
-			if serverIndex >= 0 {
-				defer ep.decrementConnection(serverIndex)
-			}
+		case LeastConnections:
+			selectedServer, selectedServerIndex = ep.GetServerLC()
 		case IPHash:
 			selectedServer = ep.GetServerIPHash(clientIP)
+
 		case WeightedRoundRobin:
 			selectedServer = ep.GetServerWRR()
+
 		default:
 			selectedServer = ep.GetServerRR() // Default to round robin
 		}
@@ -310,7 +375,28 @@ func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r 
 
 		// Create reverse proxy
 		lb.RevProxy = *httputil.NewSingleHostReverseProxy(selectedServer)
-		lb.RevProxy.ServeHTTP(w, r)
+
+    // Decrement LC when the proxied body is fully sent
+		lb.RevProxy.ModifyResponse = func(resp *http.Response) error {
+			if lb.Algo == LeastConnections && selectedServerIndex >= 0 {
+				resp.Body = &onCloseReadCloser{
+						ReadCloser: resp.Body,
+						onClose: func() {
+							ep.decrementConnection(selectedServerIndex)
+						},
+				}
+			}
+			return nil
+		}
+
+		// Also decrement if proxying fails before a response
+		lb.RevProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+				if lb.Algo == LeastConnections && selectedServerIndex >= 0 {
+						ep.decrementConnection(selectedServerIndex)
+				}
+				http.Error(w, "upstream error", http.StatusBadGateway)
+		}
+    lb.RevProxy.ServeHTTP(w, r)
 	}
 }
 
