@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  loadbalancer:
+    build: .
+    ports:
+      - "8090:8090" # Load balancer port
+      - "8080-8089:8080-8089" # Backend server ports
+    environment:
+      - GIN_MODE=release
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8090/loadbalancer/",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    networks:
+      - loadbalancer-network
+
+networks:
+  loadbalancer-network:
+    driver: bridge
