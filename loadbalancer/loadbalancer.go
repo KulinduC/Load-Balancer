@@ -16,19 +16,20 @@ import (
 	"time"
 )
 
+type onCloseRC struct {
+  io.ReadCloser
+  onClose func()
+}
+func (r *onCloseRC) Close() error {
+  err := r.ReadCloser.Close()
+  if r.onClose != nil { r.onClose() }
+  return err
+}
+
+
 var (
 	baseURL = "http://localhost:808"
 )
-
-type onCloseReadCloser struct {
-	io.ReadCloser
-	onClose func()
-}
-func (r *onCloseReadCloser) Close() error {
-	err := r.ReadCloser.Close()
-	if r.onClose != nil { r.onClose() }
-	return err
-}
 
 type Algorithm string
 
@@ -40,7 +41,6 @@ const (
 )
 
 type LoadBalancer struct {
-	RevProxy httputil.ReverseProxy
 	Algo     Algorithm
 }
 
@@ -200,6 +200,8 @@ func (e *EndPoints) decrementConnection(serverIndex int) {
 
 	if serverIndex >= 0 && serverIndex < len(e.activeConnections) && e.activeConnections[serverIndex] > 0 && e.connHeap != nil {
 		e.activeConnections[serverIndex]--
+		log.Printf("Decremented connection count for server %d. New count: %d", serverIndex, e.activeConnections[serverIndex])
+		log.Print(e.activeConnections)
 		for i := 0; i < e.connHeap.Len(); i++ {
 			if e.connHeap.nodes[i].Index == serverIndex {
 				e.connHeap.nodes[i].Connections = e.activeConnections[serverIndex]
@@ -232,7 +234,6 @@ func (e *EndPoints) GetServerLC() (*url.URL, int) {
 	if e.connHeap.Len() == 0 {
 		e.Initialize(LeastConnections)
 	}
-	e.DebugServers()
 
 	for e.connHeap.Len() > 0 {
 		node := e.connHeap.Top()
@@ -240,6 +241,7 @@ func (e *EndPoints) GetServerLC() (*url.URL, int) {
 			e.activeConnections[node.Index]++
 			node.Connections = e.activeConnections[node.Index]
 			heap.Fix(e.connHeap, 0)
+			e.DebugServers()
 			return e.List[node.Index], node.Index
 		} else {
 			heap.Pop(e.connHeap)
@@ -279,7 +281,6 @@ func (e *EndPoints) GetServerWRR() *url.URL {
 	if e.weightHeap.Len() == 0 {
 		e.Initialize(WeightedRoundRobin)
 	}
-	e.DebugServers()
 
 	for e.weightHeap.Len() > 0 {
 		node := e.weightHeap.Top()
@@ -292,6 +293,7 @@ func (e *EndPoints) GetServerWRR() *url.URL {
 			} else {
 				heap.Fix(e.weightHeap, 0)
 			}
+			e.DebugServers()
 			return e.List[node.Index]
 		} else {
 			// Remove unhealthy server from heap
@@ -346,8 +348,7 @@ func MakeLoadBalancer(amount int, algorithm Algorithm) {
 func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var selectedServer *url.URL
-		var selectedServerIndex int = -1
-
+		serverIndex := -1
 		// Get client IP for IP Hash algorithm
 		clientIP := getClientIP(r)
 
@@ -357,7 +358,7 @@ func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r 
 			selectedServer = ep.GetServerRR()
 
 		case LeastConnections:
-			selectedServer, selectedServerIndex = ep.GetServerLC()
+			selectedServer, serverIndex= ep.GetServerLC()
 		case IPHash:
 			selectedServer = ep.GetServerIPHash(clientIP)
 
@@ -374,29 +375,26 @@ func makeRequest(lb *LoadBalancer, ep *EndPoints) func(w http.ResponseWriter, r 
 		}
 
 		// Create reverse proxy
-		lb.RevProxy = *httputil.NewSingleHostReverseProxy(selectedServer)
+		// NewSingleHost returns a pointer
+		proxy := httputil.NewSingleHostReverseProxy(selectedServer)
 
-    // Decrement LC when the proxied body is fully sent
-		lb.RevProxy.ModifyResponse = func(resp *http.Response) error {
-			if lb.Algo == LeastConnections && selectedServerIndex >= 0 {
-				resp.Body = &onCloseReadCloser{
+
+		if lb.Algo == LeastConnections && serverIndex >= 0 {
+			proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+				ep.decrementConnection(serverIndex)
+			}
+			proxy.ModifyResponse = func(resp *http.Response) error {
+				resp.Body = &onCloseRC{
 						ReadCloser: resp.Body,
 						onClose: func() {
-							ep.decrementConnection(selectedServerIndex)
+								ep.decrementConnection(serverIndex)
 						},
 				}
+				return nil
 			}
-			return nil
 		}
 
-		// Also decrement if proxying fails before a response
-		lb.RevProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-				if lb.Algo == LeastConnections && selectedServerIndex >= 0 {
-						ep.decrementConnection(selectedServerIndex)
-				}
-				http.Error(w, "upstream error", http.StatusBadGateway)
-		}
-    lb.RevProxy.ServeHTTP(w, r)
+		http.StripPrefix("/loadbalancer", proxy).ServeHTTP(w, r)
 	}
 }
 
